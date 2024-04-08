@@ -1,24 +1,42 @@
 using System.Data;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using AutoMapper;
+using Dapper;
 using DotnetAPI.Data;
 using DotnetAPI.Dtos;
+using DotnetAPI.Helpers;
+using DotnetAPI.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cryptography.KeyDerivation;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Microsoft.IdentityModel.Tokens;
 
 namespace DotnetAPI.Controllers;
 
+[Authorize]
+[ApiController]
+[Route("[controller]")]
 public class AuthController : ControllerBase
 {
     private readonly DataContextDapper _dapper;
-    private readonly IConfiguration _config;
+    private readonly AuthHelper _authHelper;
+    private readonly ReusableSql _reusableSql;
+    private readonly IMapper _mapper;
     public AuthController(IConfiguration config)
     {
         _dapper = new DataContextDapper(config);
-        _config = config;
+        _authHelper = new AuthHelper(config);
+        _reusableSql = new ReusableSql(config);
+        _mapper = new Mapper(new MapperConfiguration(cfg => {
+            cfg.CreateMap<UserForRegistrationDto, UserComplete>();
+        }));
     }
 
+    [AllowAnonymous]
     [HttpPost("Register")]
     public IActionResult Register(UserForRegistrationDto userForRegistration)
     {
@@ -29,34 +47,20 @@ public class AuthController : ControllerBase
             IEnumerable<string> existingUsers = _dapper.LoadData<string>(sqlCheckUserExists);
             if (existingUsers.Count() == 0)
             {
-                byte[] passwordSalt = new byte[128 / 8];
-                using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+                UserForLoginDto userForSetPassword = new UserForLoginDto() {
+                    Email = userForRegistration.Email,
+                    Password = userForRegistration.Password
+                };
+
+                if (_authHelper.SetPassword(userForSetPassword)) 
                 {
-                    rng.GetNonZeroBytes(passwordSalt);
-                }
+                    UserComplete userComplete = _mapper.Map<UserComplete>(userForRegistration);
+                    userComplete.Active = true;
 
-                byte[] passwordHash = GetPasswordHash(userForRegistration.Password, passwordSalt);
-
-                string sqlAddAuth = @"
-                    INSERT INTO TutorialAppSchema.Auth ([Email],
-                    [PasswordHash],
-                    [PasswordSalt]) VALUES ('" + userForRegistration.Email + 
-                    "', @PasswordHash, @PasswordSalt)";
-
-                List<SqlParameter> sqlParameters = new List<SqlParameter>();
-
-                SqlParameter passwordSaltParameter = new SqlParameter("@PasswordSalt", SqlDbType.VarBinary);
-                passwordSaltParameter.Value = passwordSalt;
-
-                SqlParameter passwordHashParameter = new SqlParameter("@PasswordHash", SqlDbType.VarBinary);
-                passwordHashParameter.Value = passwordHash;
-
-                sqlParameters.Add(passwordSaltParameter);
-                sqlParameters.Add(passwordHashParameter);
-
-                if (_dapper.ExecuteSqlWithParameters(sqlAddAuth, sqlParameters)) 
-                {
-                    return Ok();
+                    if (_reusableSql.UpsertUser(userComplete)) {
+                        return Ok();
+                    }
+                    throw new Exception("Failed to Add user.");
                 }
                 throw new Exception("Failed to register user.");
             }
@@ -65,18 +69,35 @@ public class AuthController : ControllerBase
         throw new Exception("Passwords do not match!");
     }
 
+    [HttpPut("ResetPassword")]
+    public IActionResult ResetPassword(UserForLoginDto userForSetPassword)
+    {
+        if (_authHelper.SetPassword(userForSetPassword)) {
+            return Ok();
+        }
+
+        throw new Exception("Failed to update password!");
+    }
+
+    [AllowAnonymous]
     [HttpPost("Login")]
     public IActionResult Login(UserForLoginDto userForLogin)
     {
-        string sqlForHashAndSalt = @"SELECT 
-            [PasswordHash],
-            [PasswordSalt] FROM TutorialAppSchema.Auth WHERE Email = '" + 
-            userForLogin.Email + "'";
+        string sqlForHashAndSalt = @"EXEC TutorialAppSchema.spLoginConfirmation_Get @Email = @EmailParam";
+
+        DynamicParameters sqlParameters = new DynamicParameters();
+
+        // SqlParameter emailParameter = new SqlParameter("@EmailParam", SqlDbType.VarChar);
+        // emailParameter.Value = userForLogin.Email;
+        // sqlParameters.Add(emailParameter);
+
+        sqlParameters.Add("@EmailParam", userForLogin.Email, DbType.String);
+
 
         UserForLoginConfirmationDto userForConfirmation = _dapper
-            .LoadDataSingle<UserForLoginConfirmationDto>(sqlForHashAndSalt);
+            .LoadDataSingleWithParameters<UserForLoginConfirmationDto>(sqlForHashAndSalt, sqlParameters);
 
-        byte[] passwordHash = GetPasswordHash(userForLogin.Password, userForConfirmation.PasswordSalt);
+        byte[] passwordHash = _authHelper.GetPasswordHash(userForLogin.Password, userForConfirmation.PasswordSalt);
 
         for (int index = 0; index < passwordHash.Length; index++)
         {
@@ -85,20 +106,28 @@ public class AuthController : ControllerBase
             }
         }
 
-        return Ok();
+        string userIdSql = @"
+            SELECT UserId FROM TutorialAppSchema.Users WHERE Email = '" + 
+            userForLogin.Email + "'";
+
+        int userId = _dapper.LoadDataSingle<int>(userIdSql);
+
+        return Ok(new Dictionary<string, string> {
+            {"token", _authHelper.CreateToken(userId)}
+        });
     }
 
-    private byte[] GetPasswordHash(string password, byte[] passwordSalt)
+    [HttpGet("RefreshToken")]
+    public IActionResult RefreshToken()
     {
-        string passwordSaltPlusString = _config.GetSection("AppSettings.PasswordKey").Value + 
-            Convert.ToBase64String(passwordSalt);
+        string userId = User.FindFirst("userId")?.Value + "";
 
-        return KeyDerivation.Pbkdf2(
-            password: password,
-            salt: Encoding.ASCII.GetBytes(passwordSaltPlusString),
-            prf: KeyDerivationPrf.HMACSHA256,
-            iterationCount: 1000000,
-            numBytesRequested: 256 / 8
-        );
+        string userIdSql = "SELECT UserId FROM TutorialAppSchema.Users WHERE UserId = " + userId;
+
+        int userIdFromDB = _dapper.LoadDataSingle<int>(userIdSql);
+
+        return Ok(new Dictionary<string, string> {
+            {"token", _authHelper.CreateToken(userIdFromDB)}
+        });
     }
 }

@@ -72,3 +72,5 @@ C:\Users\Pawan K H\dotnet-course-code\DotnetAPI\bin\Debug\net8.0\Microsoft.Entit
 C:\Users\Pawan K H\dotnet-course-code\DotnetAPI\bin\Debug\net8.0\Microsoft.EntityFrameworkCore.Abstractions.dll
 C:\Users\Pawan K H\dotnet-course-code\DotnetAPI\bin\Debug\net8.0\Microsoft.EntityFrameworkCore.Relational.dll
 C:\Users\Pawan K H\dotnet-course-code\DotnetAPI\bin\Debug\net8.0\Microsoft.EntityFrameworkCore.SqlServer.dll
+C:\Users\Pawan K H\dotnet-course-code\DotnetAPI\obj\Debug\net8.0\DotnetAPI.sourcelink.json
+C:\Users\Pawan K H\dotnet-course-code\DotnetAPI\bin\Debug\net8.0\Microsoft.AspNetCore.Authentication.JwtBearer.dll
